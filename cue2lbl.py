@@ -7,20 +7,22 @@
 
 """
 
+import os
+import argparse
+
 
 def get_title(line):
-    """ Returns the title track metadata """
-    # TITLE, PERFORMER and SONGWRITER
-    # CD-Text metadata; applies to the whole disc or a specific track,
-    # depending on the context
-    assert(line is not None)
-    # the format of '    TITLE "Some Title"' and we simply can just
-    # ignore the first 11 chars, but to be safe lets make this
-    # assertion
-    assert(line[:11] == '    TITLE "')
+    """ Returns the track title """
+
+    assert line is not None
+    # the format of  line should be like this:
+    #   '    TITLE "Some Title"'
+    # and we simply can just ignore the first 11 chars, but to be safe lets
+    # make this assertion
+    assert line[:11] == '    TITLE "'
     # the last char should be a quote, this assertion helps validate this
     # assumption
-    assert(line[-1] == '"')
+    assert line[-1] == '"'
     return line[11:-1].strip()
 
 
@@ -39,26 +41,74 @@ def get_track_start(line):
 
     """
 
-    assert(line is not None)
-    # each index line should begin with this '    INDEX 0'
-    assert(line[:11] == '    INDEX 0')
-    # there are 
-    assert(line[11] == '0' or line[11] == '1')
+    assert line is not None
+    # each index line for title should begin with this '    INDEX 0'
+    assert line[:11] == '    INDEX 0'
+    # there could higher-numbered indexes but I haven't seen any in QUE files
+    assert line[11] == '0' or line[11] == '1'
     # were not interested int pregap track start time
     if line[11] == '0':
         return
     # making sure we have the right index, which is required
-    assert(line[11] == '1')
+    assert line[11] == '1'
+
+    # expecting the remainder to contain only something that fits the
+    # following format dd:dd:dd
+    assert line[12:].strip().count(':') == 2
 
     minutes, seconds, frames = line[12:].strip().split(':')
-    frames_to_sec = str(int(frames) / 75).split('.')[1][:6].ljust(6, '0')
-    return '%d.%s' % (int(minutes) * 60 + int(seconds), frames_to_sec)
+
+    # checking every value ensuring its numeric by composition
+    assert minutes.isdigit()
+    assert seconds.isdigit()
+    assert frames.isdigit()
+
+    minutes, seconds, frames = int(minutes), int(seconds), int(frames)
+
+    # doesn't hurt to check the value ranges
+    assert minutes >= 0
+    assert seconds >= 0 and seconds <= 59
+    assert frames >= 0 and frames <= 75
+
+    frames_to_sec = frames / 75
+
+    assert isinstance(frames_to_sec, float)
+
+    frames_to_sec = round(frames_to_sec, 6)
+
+    # terrible hack to find the mantissa part however its fast enough?
+    frames_to_sec = str(frames_to_sec).split('.')
+    assert len(frames_to_sec) == 2
+    assert frames_to_sec[1]
+
+    # we want to cap the number of digits we get back to six. I don't thinks
+    # Audacity cares about values after this precision
+    frames_to_sec = frames_to_sec[1][:6]
+
+    assert len(frames_to_sec) <= 6
+
+    # padding with zeros to make the output look aligned
+    frames_to_sec = frames_to_sec.ljust(6, '0')
+
+    assert len(frames_to_sec) == 6
+
+    return '%d.%s' % (minutes * 60 + seconds, frames_to_sec)
 
 
 def get_tracks(path_to_file):
     """ Returns tracks """
 
-    data = [line[:-1] for line in open(path_to_file, 'r')]
+    if not os.path.isfile(path_to_file):
+        raise IOError('the file doesn\'t appear to be a file. yea like may '
+                      'be it\'s not a file. who knows try again, may be?')
+
+    # we're going to be doing look-aheads, don't want to peek around with the
+    # file access pointer. These files are typically small with tracks into
+    # double digits. I think its safe to load the entire file into mem
+    data = []
+    with open(path_to_file, 'r') as f_pt:
+        data = [line[:-1] for line in f_pt]
+
     tracks = []
     for idx in range(len(data)):
         # Each audio track section begins with this line
@@ -78,11 +128,75 @@ def get_tracks(path_to_file):
                         track_start = get_track_start(next_line)
                 except IndexError:
                     break
-            tracks.append('%s %s %s' % (track_start.ljust(11), 
-                    track_start.ljust(11), title))
+            tracks.append('%s %s %s' % (track_start.ljust(11),
+                                        track_start.ljust(11), title))
 
     return tracks
 
 
-for track in get_tracks(path_to_file=file_path):
-    print(track)
+def write_label_file(file_path, over_write_existing=False, root_path=None):
+    """ Writes a label.txt file generated from file_path to the QUE file """
+
+    if root_path:
+        file_path = os.path.join(root_path, file_path)
+    else:
+        root_path = os.path.dirname(file_path)
+
+    tracks = get_tracks(path_to_file=file_path)
+
+    labels_file = os.path.join(root_path, 'labels.txt')
+    if os.path.isfile(labels_file) and not over_write_existing:
+        raise IOError('Can\'t create [%s]. This file already '
+                      'exists. Set the overwrite option' % labels_file)
+    with open(labels_file, 'w') as f_pt:
+        if os.path.isfile(labels_file) and over_write_existing:
+            f_pt.truncate()
+        for track in tracks[:-1]:
+            f_pt.write("%s\n" % track)
+        f_pt.write("%s" % tracks[-1])
+
+
+def write_labels_in_dir(dir_path, over_write_existing=False):
+    """ Writes labels files for all the QUE files in the directory and
+    subdirectories"""
+
+    if not os.path.isdir(dir_path):
+        raise IOError('the directory doesn\'t appear to be a directory. '
+                      'yea like may be it\'s not a directory. who knows '
+                      'try again, may be?')
+
+    for root, _, files in os.walk(dir_path):
+        for file in files:
+            if file.lower()[-4:] == '.cue':
+                write_label_file(file_path=file,
+                                 over_write_existing=over_write_existing,
+                                 root_path=root)
+
+
+if __name__ == "__main__":
+
+    PARSER = argparse.ArgumentParser()
+    PARSER.add_argument("-d", "--dirpath", help='Path to the directory where'
+                        ' QUE files may be found')
+    PARSER.add_argument("-f", "--filepath", help='Path to the file where QUE'
+                        ' file exists')
+    PARSER.add_argument("-o", "--overwrite", help='Enables the converter to '
+                        'overwrite existing label.txt files',
+                        action='store_true',
+                        default=False)
+
+    ARGS = PARSER.parse_args()
+    if ARGS.dirpath and ARGS.filepath:
+        print('Cant set both -d and -f options at the same time')
+    elif ARGS.dirpath:
+        try:
+            write_labels_in_dir(dir_path=ARGS.dirpath,
+                                over_write_existing=ARGS.overwrite)
+        except IOError as exception:
+            print(exception)
+    elif ARGS.filepath:
+        try:
+            write_label_file(file_path=ARGS.filepath,
+                             over_write_existing=ARGS.overwrite)
+        except IOError as exception:
+            print(exception)
