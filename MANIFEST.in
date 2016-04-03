@@ -1,0 +1,12 @@
+include CHANGES.rst
+include LICENSE
+include README.rst
+
+recursive-include docs Makefile *.py *.rst
+
+exclude .coveragerc
+exclude .travis.yml
+exclude tox.ini
+
+prune docs/_build
+prune tests
